@@ -21,7 +21,6 @@
  */
 
 #include <linux/pci.h>
-#include <linux/iopoll.h>
 #include <linux/irq.h>
 #include <linux/log2.h>
 #include <linux/module.h>
@@ -48,6 +47,7 @@ static unsigned int quirks;
 module_param(quirks, uint, S_IRUGO);
 MODULE_PARM_DESC(quirks, "Bit flags for quirks to be enabled as default");
 
+/* TODO: copied from ehci-hcd.c - can this be refactored? */
 /*
  * xhci_handshake - spin reading hc until handshake completes or fails
  * @ptr: address of hc register to be read
@@ -64,16 +64,18 @@ MODULE_PARM_DESC(quirks, "Bit flags for quirks to be enabled as default");
 int xhci_handshake(void __iomem *ptr, u32 mask, u32 done, int usec)
 {
 	u32	result;
-	int	ret;
 
-	ret = readl_poll_timeout_atomic(ptr, result,
-					(result & mask) == done ||
-					result == U32_MAX,
-					1, usec);
-	if (result == U32_MAX)		/* card removed */
-		return -ENODEV;
-
-	return ret;
+	do {
+		result = readl(ptr);
+		if (result == ~(u32)0)		/* card removed */
+			return -ENODEV;
+		result &= mask;
+		if (result == done)
+			return 0;
+		udelay(1);
+		usec--;
+	} while (usec > 0);
+	return -ETIMEDOUT;
 }
 
 int xhci_handshake_check_state(struct xhci_hcd *xhci,
@@ -133,8 +135,10 @@ int xhci_halt(struct xhci_hcd *xhci)
 	if (!ret)
 		xhci->xhc_state |= XHCI_STATE_HALTED;
 	else
-		xhci_warn(xhci, "Host not halted after %u microseconds.\n",
-				XHCI_MAX_HALT_USEC);
+/* Anderson@, 2016/07/01, host controller halted for otg */
+		xhci_warn(xhci,
+			"Host not halted after %u ms. ret=%d\n",
+			XHCI_MAX_HALT_USEC, ret);
 
 	xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
 
@@ -1017,6 +1021,19 @@ int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup)
 		xhci_warn(xhci, "WARN: xHC CMD_RUN timeout\n");
 		spin_unlock_irq(&xhci->lock);
 		return -ETIMEDOUT;
+	}
+	if ((readl_relaxed(&xhci->op_regs->status) & STS_EINT) ||
+			(readl_relaxed(&xhci->op_regs->status) & STS_PORT)) {
+		xhci_warn(xhci, "WARN: xHC EINT/PCD set status:%x\n",
+			readl_relaxed(&xhci->op_regs->status));
+		set_bit(HCD_FLAG_HW_ACCESSIBLE, &hcd->flags);
+		set_bit(HCD_FLAG_HW_ACCESSIBLE, &xhci->shared_hcd->flags);
+		/* step 4: set Run/Stop bit */
+		command = readl_relaxed(&xhci->op_regs->command);
+		command |= CMD_RUN;
+		writel_relaxed(command, &xhci->op_regs->command);
+		spin_unlock_irq(&xhci->lock);
+		return -EBUSY;
 	}
 	xhci_clear_command_ring(xhci);
 
@@ -2854,6 +2871,12 @@ int xhci_check_bandwidth(struct usb_hcd *hcd, struct usb_device *udev)
 	xhci_dbg_ctx(xhci, virt_dev->in_ctx,
 		     LAST_CTX_TO_EP_NUM(le32_to_cpu(slot_ctx->dev_info)));
 
+/* Anderson@, 2016/07/01, host controller halted for otg */
+	if (hcd->state == HC_STATE_QUIESCING) {
+		xhci_warn(xhci, "hcd->state=%d\n", hcd->state);
+		goto command_cleanup;
+	}
+
 	ret = xhci_configure_endpoint(xhci, udev, command,
 			false, false);
 	if (ret)
@@ -4218,6 +4241,7 @@ int xhci_set_usb2_hardware_lpm(struct usb_hcd *hcd,
 	pm_addr = port_array[port_num] + PORTPMSC;
 	pm_val = readl(pm_addr);
 	hlpm_addr = port_array[port_num] + PORTHLPMC;
+	field = le32_to_cpu(udev->bos->ext_cap->bmAttributes);
 
 	xhci_dbg(xhci, "%s port %d USB2 hardware LPM\n",
 			enable ? "enable" : "disable", port_num + 1);
@@ -4229,7 +4253,6 @@ int xhci_set_usb2_hardware_lpm(struct usb_hcd *hcd,
 			 * default one which works with mixed HIRD and BESL
 			 * systems. See XHCI_DEFAULT_BESL definition in xhci.h
 			 */
-			field = le32_to_cpu(udev->bos->ext_cap->bmAttributes);
 			if ((field & USB_BESL_SUPPORT) &&
 			    (field & USB_BESL_BASELINE_VALID))
 				hird = USB_GET_BESL_BASELINE(field);

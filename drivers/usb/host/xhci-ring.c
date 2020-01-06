@@ -262,6 +262,11 @@ void xhci_ring_cmd_db(struct xhci_hcd *xhci)
 
 static bool xhci_mod_cmd_timer(struct xhci_hcd *xhci, unsigned long delay)
 {
+/*2018/03/19 handle xiaomi typec headset dsp crash issue*/
+	if ((connected_usb_idVendor == 0x2717) &&
+		(connected_usb_idProduct == 0x3801)) {
+		delay = 500;
+	}
 	return mod_delayed_work(system_wq, &xhci->cmd_timer, delay);
 }
 
@@ -668,7 +673,6 @@ void xhci_unmap_td_bounce_buffer(struct xhci_hcd *xhci, struct xhci_ring *ring,
 	struct device *dev = xhci_to_hcd(xhci)->self.sysdev;
 	struct xhci_segment *seg = td->bounce_seg;
 	struct urb *urb = td->urb;
-	size_t len;
 
 	if (!seg || !urb)
 		return;
@@ -679,14 +683,11 @@ void xhci_unmap_td_bounce_buffer(struct xhci_hcd *xhci, struct xhci_ring *ring,
 		return;
 	}
 
+	/* for in tranfers we need to copy the data from bounce to sg */
+	sg_pcopy_from_buffer(urb->sg, urb->num_mapped_sgs, seg->bounce_buf,
+			     seg->bounce_len, seg->bounce_offs);
 	dma_unmap_single(dev, seg->bounce_dma, ring->bounce_buf_len,
 			 DMA_FROM_DEVICE);
-	/* for in tranfers we need to copy the data from bounce to sg */
-	len = sg_pcopy_from_buffer(urb->sg, urb->num_sgs, seg->bounce_buf,
-			     seg->bounce_len, seg->bounce_offs);
-	if (len != seg->bounce_len)
-		xhci_warn(xhci, "WARN Wrong bounce buffer read length: %zu != %d\n",
-				len, seg->bounce_len);
 	seg->bounce_len = 0;
 	seg->bounce_offs = 0;
 }
@@ -1294,6 +1295,15 @@ void xhci_handle_command_timeout(struct work_struct *work)
 		xhci->cmd_ring_state = CMD_RING_STATE_ABORTED;
 		xhci_dbg(xhci, "Command timeout\n");
 		ret = xhci_abort_cmd_ring(xhci, flags);
+/*2017/03/19 handle xiaomi typec headset dsp crash issue*/
+		if ((ret == -1) && (connected_usb_idVendor == 0x2717) &&
+			(connected_usb_idProduct == 0x3801)) {
+			xhci_err(xhci, "Abort command ring failed reset usb device\n");
+			xhci_cleanup_command_queue(xhci);
+			spin_unlock_irqrestore(&xhci->lock, flags);
+			kick_usbpd_vbus_sm();
+			return;
+		}
 		if (unlikely(ret == -ESHUTDOWN)) {
 			xhci_err(xhci, "Abort command ring failed\n");
 			xhci_cleanup_command_queue(xhci);
@@ -2748,6 +2758,11 @@ irqreturn_t xhci_irq(struct usb_hcd *hcd)
 	if (status == 0xffffffff)
 		goto hw_died;
 
+/* david.liu@bsp, 20171121 Abort suspend when interrupt is pending */
+	if (status & STS_HCE) {
+		xhci_warn(xhci, "WARNING: Host controller Error\n");
+	}
+
 	if (!(status & STS_EINT)) {
 		spin_unlock(&xhci->lock);
 		return IRQ_NONE;
@@ -3157,7 +3172,6 @@ static int xhci_align_td(struct xhci_hcd *xhci, struct urb *urb, u32 enqd_len,
 	unsigned int unalign;
 	unsigned int max_pkt;
 	u32 new_buff_len;
-	size_t len;
 
 	max_pkt = GET_MAX_PACKET(usb_endpoint_maxp(&urb->ep->desc));
 	unalign = (enqd_len + *trb_buff_len) % max_pkt;
@@ -3188,12 +3202,8 @@ static int xhci_align_td(struct xhci_hcd *xhci, struct urb *urb, u32 enqd_len,
 
 	/* create a max max_pkt sized bounce buffer pointed to by last trb */
 	if (usb_urb_dir_out(urb)) {
-		len = sg_pcopy_to_buffer(urb->sg, urb->num_sgs,
+		sg_pcopy_to_buffer(urb->sg, urb->num_mapped_sgs,
 				   seg->bounce_buf, new_buff_len, enqd_len);
-		if (len != seg->bounce_len)
-			xhci_warn(xhci,
-				"WARN Wrong bounce buffer write length: %zu != %d\n",
-				len, seg->bounce_len);
 		seg->bounce_dma = dma_map_single(dev, seg->bounce_buf,
 						 max_pkt, DMA_TO_DEVICE);
 	} else {
