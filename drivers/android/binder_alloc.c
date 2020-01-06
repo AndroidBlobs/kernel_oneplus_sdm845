@@ -32,6 +32,7 @@
 #include <linux/highmem.h>
 #include "binder_alloc.h"
 #include "binder_trace.h"
+#include <../drivers/oneplus/coretech/uxcore/opchain_helper.h>
 
 struct list_lru binder_alloc_lru;
 
@@ -891,13 +892,14 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 
 	index = page - alloc->pages;
 	page_addr = (uintptr_t)alloc->buffer + index * PAGE_SIZE;
-
-	mm = alloc->vma_vm_mm;
-	if (!mmget_not_zero(mm))
-		goto err_mmget;
-	if (!down_write_trylock(&mm->mmap_sem))
-		goto err_down_write_mmap_sem_failed;
 	vma = alloc->vma;
+	if (vma) {
+		if (!mmget_not_zero(alloc->vma_vm_mm))
+			goto err_mmget;
+		mm = alloc->vma_vm_mm;
+		if (!down_write_trylock(&mm->mmap_sem))
+			goto err_down_write_mmap_sem_failed;
+	}
 
 	list_lru_isolate(lru, item);
 	spin_unlock(lock);
@@ -908,9 +910,10 @@ enum lru_status binder_alloc_free_page(struct list_head *item,
 		zap_page_range(vma, page_addr, PAGE_SIZE, NULL);
 
 		trace_binder_unmap_user_end(alloc, index);
+
+		up_write(&mm->mmap_sem);
+		mmput(mm);
 	}
-	up_write(&mm->mmap_sem);
-	mmput(mm);
 
 	trace_binder_unmap_kernel_start(alloc, index);
 
@@ -1090,6 +1093,21 @@ binder_alloc_copy_user_to_buffer(struct binder_alloc *alloc,
 		buffer_offset += size;
 	}
 	return 0;
+}
+
+void binder_alloc_pass_binder_buffer(struct binder_alloc *alloc,
+				struct binder_buffer *buffer,
+				binder_size_t buffer_size)
+{
+	struct page *page;
+	pgoff_t pgoff;
+	void *kptr;
+
+	page = binder_alloc_get_page(alloc, buffer,
+						0, &pgoff);
+	kptr = kmap_atomic(page) + pgoff;
+	opc_binder_pass(buffer_size, kptr, 1);
+	kunmap_atomic(kptr);
 }
 
 static void binder_alloc_do_buffer_copy(struct binder_alloc *alloc,
