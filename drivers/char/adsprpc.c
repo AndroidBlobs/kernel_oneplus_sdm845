@@ -240,8 +240,6 @@ struct smq_invoke_ctx {
 	unsigned int *attrs;
 	uint32_t *crc;
 	uint64_t ctxid;
-	void *handle;
-	const void *ptr;
 };
 
 struct fastrpc_ctx_lst {
@@ -2046,8 +2044,7 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 		if (err)
 			goto bail;
 	}
-	if (ctx->handle)
-		glink_rx_done(ctx->handle, ctx->ptr, true);
+
 	PERF(fl->profile, GET_COUNTER(perf_counter, PERF_INVARGS),
 	if (!fl->sctx->smmu.coherent)
 		inv_args(ctx);
@@ -2760,6 +2757,7 @@ static int fastrpc_internal_mmap(struct fastrpc_file *fl,
 		mutex_lock(&fl->fl_map_mutex);
 		if (!fastrpc_mmap_find(fl, ud->fd, (uintptr_t)ud->vaddrin,
 				 ud->size, ud->flags, 1, &map)) {
+			ud->vaddrout = map->raddr;
 			mutex_unlock(&fl->fl_map_mutex);
 			mutex_unlock(&fl->map_mutex);
 			return 0;
@@ -2886,13 +2884,11 @@ static void fastrpc_glink_notify_rx(void *handle, const void *priv,
 	if (err)
 		goto bail;
 
-	me->ctxtable[index]->handle = handle;
-	me->ctxtable[index]->ptr = ptr;
-
 	context_notify_user(me->ctxtable[index], rsp->retval);
 bail:
 	if (err)
 		pr_err("adsprpc: invalid response or context\n");
+	glink_rx_done(handle, ptr, true);
 }
 
 static void fastrpc_glink_notify_state(void *handle, const void *priv,
