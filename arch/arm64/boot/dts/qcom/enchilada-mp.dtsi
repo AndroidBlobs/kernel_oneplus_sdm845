@@ -1,5 +1,4 @@
-/*
- * Copyright (c) 2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2016-2017, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -10,13 +9,15 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+/*don't suggest add to this file, this file is only for different hw*/
+&vendor {
 
-/dts-v1/;
-/plugin/;
+};
 
-#include "sdm429-spyro-qrd-evt.dtsi"
+&soc {
 
-/ {
-	model = "Qualcomm Technologies, Inc. SDM429 QRD Spyro Overlay";
-	qcom,board-id = <0xb 6>;
+};
+
+&dsi_samsung_sofef00_m_cmd {
+	qcom,mdss-panel-mismatch-check;
 };
